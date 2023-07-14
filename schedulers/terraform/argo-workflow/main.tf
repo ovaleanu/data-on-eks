@@ -1,17 +1,30 @@
 #---------------------------------------------------------------
 # EKS Blueprints
 #---------------------------------------------------------------
-module "eks_blueprints" {
-  source = "github.com/aws-ia/terraform-aws-eks-blueprints?ref=v4.15.0"
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "~> 19.15"
 
   cluster_name    = local.name
   cluster_version = var.eks_cluster_version
 
-  vpc_id             = module.vpc.vpc_id
-  private_subnet_ids = module.vpc.private_subnets
+  vpc_id     = module.vpc.vpc_id
+  subnet_ids = module.vpc.private_subnets
 
   cluster_endpoint_private_access = true # if true, Kubernetes API requests within your cluster's VPC (such as node to control plane communication) use the private VPC endpoint
   cluster_endpoint_public_access  = true # if true, Your cluster API server is accessible from the internet. You can, optionally, limit the CIDR blocks that can access the public endpoint.
+
+  manage_aws_auth_configmap = true
+  aws_auth_roles = [
+    {
+      rolearn  = module.eks_blueprints_kubernetes_addons.karpenter.iam_role_arn
+      username = "system:node:{{EC2PrivateDNSName}}"
+      groups = [
+        "system:bootstrappers",
+        "system:nodes",
+      ]
+    }
+  ]
 
   #---------------------------------------------------------------
   # Note: This can further restricted to specific required for each Add-on and your application
@@ -49,11 +62,18 @@ module "eks_blueprints" {
     }
   }
 
-  managed_node_groups = {
+  eks_managed_node_group_defaults = {
+    iam_role_additional_policies = {
+      # Not required, but used in the example to access the nodes to inspect mounted volumes
+      AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    }
+  }
+
+  eks_managed_node_groups = {
     # Core node group for deploying all the critical add-ons
     mng1 = {
-      node_group_name = "core-node-grp"
-      subnet_ids      = module.vpc.private_subnets
+      name       = "core-node-grp"
+      subnet_ids = module.vpc.private_subnets
 
       instance_types = ["m5.xlarge"]
       ami_type       = "AL2_x86_64"
@@ -68,9 +88,9 @@ module "eks_blueprints" {
       create_launch_template = true
       launch_template_os     = "amazonlinux2eks"
 
-      update_config = [{
+      update_config = {
         max_unavailable_percentage = 50
-      }]
+      }
 
       k8s_labels = {
         Environment   = "preprod"
@@ -92,29 +112,33 @@ module "eks_blueprints" {
     }
   }
 
-  application_teams = {
-    data-team-a = { # namespace
-      "labels" = {
+  tags = local.tags
+}
+
+module "eks_blueprints_app_teams" {
+  source  = "aws-ia/eks-blueprints-teams/aws"
+  version = "~> 0.2"
+
+  name = "data-team-a"
+
+  users             = [data.aws_caller_identity.current.arn]
+  cluster_arn       = module.eks.cluster_arn
+  oidc_provider_arn = module.eks.oidc_provider_arn
+
+  namespaces = {
+    "data-team-a" = {
+      labels = {
         "appName"     = "data-team-app",
         "projectName" = "project-teamA",
         "environment" = "dev"
       }
-      "quota" = {
-        "pods"     = "10",
-        "secrets"  = "10",
-        "services" = "10"
+      resource_quota = {
+        hard = {
+          "pods"     = "10",
+          "secrets"  = "10",
+          "services" = "10"
+        }
       }
     }
   }
-
-  tags = local.tags
-}
-
-#---------------------------------------------------------------
-# Amazon Prometheus Workspace
-#---------------------------------------------------------------
-resource "aws_prometheus_workspace" "amp" {
-  alias = format("%s-%s", "amp-ws", local.name)
-
-  tags = local.tags
 }
