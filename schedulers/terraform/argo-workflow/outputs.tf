@@ -8,6 +8,11 @@ output "eks_api_server_url" {
   value       = module.eks.cluster_endpoint
 }
 
+output "your_event_irsa_arn" {
+  description = "the ARN of IRSA for argo events"
+  value       = module.irsa_argo_events.iam_role_arn
+}
+
 output "grafana_secret_name" {
   description = "Grafana password secret name"
   value       = aws_secretsmanager_secret.grafana.name

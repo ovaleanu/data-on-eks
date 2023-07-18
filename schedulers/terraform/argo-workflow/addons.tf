@@ -27,8 +27,10 @@ module "eks_blueprints_kubernetes_addons" {
   #---------------------------------------------------------------
   # Amazon EKS Managed Add-ons
   #---------------------------------------------------------------
+  
+  #---------------------------------------------------------------
   # EKS Addons
-
+  #---------------------------------------------------------------
   eks_addons = {
     aws-ebs-csi-driver = {
       service_account_role_arn = module.ebs_csi_driver_irsa.iam_role_arn
@@ -70,31 +72,22 @@ module "eks_blueprints_kubernetes_addons" {
   #---------------------------------------------------------------
   enable_kube_prometheus_stack = true
   kube_prometheus_stack = {
-    values = [templatefile("${path.module}/helm-values/prom-grafana-values.yaml", {})]
+    values = [
+      var.enable_amazon_prometheus ? templatefile("${path.module}/helm-values/kube-prometheus-amp-enable.yaml", {
+        region              = local.region
+        amp_sa              = local.amp_ingest_service_account
+        amp_irsa            = module.amp_ingest_irsa[0].iam_role_arn
+        amp_remotewrite_url = "https://aps-workspaces.${local.region}.amazonaws.com/workspaces/${aws_prometheus_workspace.amp[0].id}/api/v1/remote_write"
+        amp_url = "https://aps-workspaces.${local.region}.amazonaws.com/workspaces/${aws_prometheus_workspace.amp[0].id}"
+      }) : templatefile("${path.module}/helm-values/kube-prometheus.yaml", {})
+    ]
+    chart_version = "48.1.1"
     set_sensitive = [
       {
         name  = "grafana.adminPassword"
         value = data.aws_secretsmanager_secret_version.admin_password_version.secret_string
       }
     ],
-    set = var.enable_amazon_prometheus ? [
-      {
-        name  = "prometheus.serviceAccount.name"
-        value = local.amp_ingest_service_account
-      },
-      {
-        name  = "prometheus.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-        value = module.amp_ingest_irsa[0].iam_role_arn
-      },
-      {
-        name  = "prometheus.prometheusSpec.remoteWrite[0].url"
-        value = "https://aps-workspaces.${local.region}.amazonaws.com/workspaces/${aws_prometheus_workspace.amp[0].id}/api/v1/remote_write"
-      },
-      {
-        name  = "prometheus.prometheusSpec.remoteWrite[0].sigv4.region"
-        value = local.region
-      }
-    ] : []
   }
 
   #---------------------------------------
@@ -108,10 +101,10 @@ module "eks_blueprints_kubernetes_addons" {
     retention_in_days = 30
   }
   aws_for_fluentbit = {
-    create_namespace = true
-    namespace        = "aws-for-fluentbit"
-    create_role      = true
-    role_policies    = { "policy1" = aws_iam_policy.fluentbit.arn }
+    s3_bucket_arns = [
+      module.fluentbit_s3_bucket.s3_bucket_arn,
+      "${module.fluentbit_s3_bucket.s3_bucket_arn}/*}"
+    ]
     values = [templatefile("${path.module}/helm-values/aws-for-fluentbit-values.yaml", {
       region               = local.region,
       cloudwatch_log_group = "/${local.name}/aws-fluentbit-logs"
@@ -119,6 +112,8 @@ module "eks_blueprints_kubernetes_addons" {
       cluster_name         = module.eks.cluster_name
     })]
   }
+
+  tags = local.tags
 }
 
 #---------------------------------------------------------------
@@ -135,7 +130,7 @@ module "kubernetes_data_addons" {
   #---------------------------------------------------------------
   # Spark Operator Add-on
   #---------------------------------------------------------------
-  enable_spark_operator = true
+  enable_spark_operator = false
   spark_operator_helm_config = {
     values = [templatefile("${path.module}/helm-values/spark-operator-values.yaml", {})]
   }
@@ -227,90 +222,65 @@ resource "kubernetes_role_binding" "admin_rolebinding_data_teama" {
 # IRSA for Argo events to read SQS
 #---------------------------------------------------------------
 
-module "irsa_argo_events" {
-  source = "github.com/aws-ia/terraform-aws-eks-blueprints//modules/irsa?ref=v4.32.1"
-
-  create_kubernetes_namespace = true
-  kubernetes_namespace        = "argo-events"
-  kubernetes_service_account  = "event-sa"
-  irsa_iam_policies           = [data.aws_iam_policy.sqs.arn]
-  eks_cluster_id              = module.eks.cluster_name
-  eks_oidc_provider_arn       = module.eks.oidc_provider_arn
-}
-
 data "aws_iam_policy" "sqs" {
   name = "AmazonSQSReadOnlyAccess"
 }
 
-#locals {
-#  event_namespace = "argo-events"
-#  event_service_account = "event-sa"
-#}
-
-#resource "kubernetes_namespace_v1" "argo_events" {
-#  metadata {
-#    name = local.event_namespace
-#  }
-#  depends_on = [module.eks.cluster_name]
-#}
-
-#resource "kubernetes_service_account_v1" "event_sa" {
-#  metadata {
-#    name        = local.event_service_account
-#    namespace   = kubernetes_namespace_v1.argo_events.metadata[0].name
-#    annotations = { "eks.amazonaws.com/role-arn" : module.irsa_argo_events.iam_role_arn }
-#  }
-
-#  automount_service_account_token = true
-#}
-
-#resource "kubernetes_secret_v1" "event_sa" {
-#  metadata {
-#    name      = "${local.event_service_account}-secret"
-#    namespace = kubernetes_namespace_v1.argo_events.metadata[0].name
-#    annotations = {
-#      "kubernetes.io/service-account.name"      = kubernetes_service_account_v1.event_sa.metadata[0].name
-#      "kubernetes.io/service-account.namespace" = kubernetes_namespace_v1.argo_events.metadata[0].name
-#    }
-#  }
-
-#  type = "kubernetes.io/service-account-token"
-#}
-
-#module "irsa_argo_events" {
-#  source = "aws-ia/eks-blueprints-addon/aws"
-#  version               = "~> 1.0"
-#  create_release = false
-#  create_role = true
-#  role_name      = "${local.name}-${local.event_namespace}"
-#  role_policies = { policy2 = data.aws_iam_policy.sqs.arn }
-
-#  oidc_providers = {
-#    this = {
-#      provider_arn    = module.eks.oidc_provider_arn
-#      namespace       = local.event_namespace
-#      service_account = local.event_service_account
-#    }
-#  }
-
-#  tags = local.tags
-#}
-
-
-#------------------------------------------
-# Amazon Prometheus
-#------------------------------------------
 locals {
-  amp_ingest_service_account = "amp-iamproxy-ingest-service-account"
-  amp_namespace              = "kube-prometheus-stack"
+  event_namespace = "argo-events"
+  event_service_account = "event-sa"
 }
 
-resource "aws_prometheus_workspace" "amp" {
-  count = var.enable_amazon_prometheus ? 1 : 0
-
-  alias = format("%s-%s", "amp-ws", local.name)
-  tags  = local.tags
+resource "kubernetes_namespace_v1" "argo_events" {
+  metadata {
+    name = local.event_namespace
+  }
+  depends_on = [module.eks.cluster_name]
 }
+
+resource "kubernetes_service_account_v1" "event_sa" {
+  metadata {
+    name        = local.event_service_account
+    namespace   = kubernetes_namespace_v1.argo_events.metadata[0].name
+    annotations = { "eks.amazonaws.com/role-arn" : module.irsa_argo_events.iam_role_arn }
+  }
+
+  automount_service_account_token = true
+}
+
+resource "kubernetes_secret_v1" "event_sa" {
+  metadata {
+    name      = "${local.event_service_account}-secret"
+    namespace = kubernetes_namespace_v1.argo_events.metadata[0].name
+    annotations = {
+      "kubernetes.io/service-account.name"      = kubernetes_service_account_v1.event_sa.metadata[0].name
+      "kubernetes.io/service-account.namespace" = kubernetes_namespace_v1.argo_events.metadata[0].name
+    }
+  }
+
+  type = "kubernetes.io/service-account-token"
+}
+
+module "irsa_argo_events" {
+  source = "aws-ia/eks-blueprints-addon/aws"
+  version               = "~> 1.0"
+  create_release = false
+  create_policy = false
+  create_role = true
+  role_name      = "${local.name}-${local.event_namespace}"
+  role_policies = { policy_event = data.aws_iam_policy.sqs.arn }
+
+  oidc_providers = {
+    this = {
+      provider_arn    = module.eks.oidc_provider_arn
+      namespace       = local.event_namespace
+      service_account = local.event_service_account
+    }
+  }
+
+  tags = local.tags
+}
+
 
 #---------------------------------------------------------------
 # Grafana Admin credentials resources
@@ -338,28 +308,6 @@ resource "aws_secretsmanager_secret_version" "grafana" {
 }
 
 #---------------------------------------------------------------
-# IRSA for Amazon Managed Prometheus
-#---------------------------------------------------------------
-module "amp_ingest_irsa" {
-  count = var.enable_amazon_prometheus ? 1 : 0
-
-  source    = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version   = "~> 5.14"
-  role_name = format("%s-%s", local.name, "amp-ingest")
-
-  attach_amazon_managed_service_prometheus_policy  = true
-  amazon_managed_service_prometheus_workspace_arns = [aws_prometheus_workspace.amp[0].arn]
-
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["${local.amp_namespace}:${local.amp_ingest_service_account}"]
-    }
-  }
-  tags = local.tags
-}
-
-#---------------------------------------------------------------
 # IAM Policy for FluentBit Add-on
 #---------------------------------------------------------------
 resource "aws_iam_policy" "fluentbit" {
@@ -368,11 +316,44 @@ resource "aws_iam_policy" "fluentbit" {
   policy      = data.aws_iam_policy_document.fluent_bit.json
 }
 
+data "aws_iam_policy_document" "fluent_bit" {
+  statement {
+    sid       = ""
+    effect    = "Allow"
+    resources = ["arn:${data.aws_partition.current.partition}:s3:::${module.fluentbit_s3_bucket.s3_bucket_id}/*"]
+
+    actions = [
+      "s3:ListBucket",
+      "s3:PutObject",
+      "s3:PutObjectAcl",
+      "s3:GetObject",
+      "s3:GetObjectAcl",
+      "s3:DeleteObject",
+      "s3:DeleteObjectVersion"
+    ]
+  }
+
+  statement {
+    sid       = ""
+    effect    = "Allow"
+    resources = ["arn:${data.aws_partition.current.partition}:logs:${data.aws_region.current.id}:${data.aws_caller_identity.current.account_id}:log-group:*"]
+
+    actions = [
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:DescribeLogGroups",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents",
+      "logs:PutRetentionPolicy",
+    ]
+  }
+}
+
+
 #---------------------------------------------------------------
 # S3 log bucket for FluentBit
 #---------------------------------------------------------------
 
-#tfsec:ignore:*
 module "fluentbit_s3_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 3.0"
