@@ -45,6 +45,10 @@ module "eks_blueprints_kubernetes_addons" {
       most_recent = true
       preserve    = true
     }
+    vpc-cni = {
+      most_recent = true
+      preserve    = true
+    }
   }
   #---------------------------------------
   # Kubernetes Add-ons
